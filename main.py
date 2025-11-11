@@ -12,28 +12,36 @@ from sqlalchemy import create_engine
 class CareerNavigator:
     def __init__(self):
         # --- Connection Details for Distributed Setup ---
-        pg_user = "dewansh"
-        pg_pass = "password123"
-        pg_host = "192.168.52.137"
-        pg_db = "profile_db"
+        load_dotenv()
+        pg_user = os.getenv("PG_USER")
+        pg_pass = os.getenv("PG_PASS")
+        pg_host = os.getenv("PG_HOST") # Was '192.168.52.137'
+        pg_db = os.getenv("PG_DB")
+        pg_port = os.getenv("PG_PORT")
 
-        mysql_user = "remote_user"
-        mysql_pass = "password321"
-        mysql_host = "192.168.52.116"
-        mysql_db = "jobsdb"
+        mysql_user = os.getenv("MYSQL_USER")
+        mysql_pass = os.getenv("MYSQL_PASS")
+        mysql_host = os.getenv("MYSQL_HOST") # Was '192.168.52.116'
+        mysql_db = os.getenv("MYSQL_DB")
+        mysql_port = os.getenv("MYSQL_PORT")
         
         # Create SQLAlchemy Engines for Pandas
-        pg_uri = f"postgresql://{pg_user}:{pg_pass}@{pg_host}/{pg_db}"
-        mysql_uri = f"mysql+mysqlconnector://{mysql_user}:{mysql_pass}@{mysql_host}/{mysql_db}"
+        pg_uri = f"postgresql://{pg_user}:{pg_pass}@{pg_host}:{pg_port}/{pg_db}"
+        mysql_uri = f"mysql+mysqlconnector://{mysql_user}:{mysql_pass}@{mysql_host}:{mysql_port}/{mysql_db}"
         self.pg_engine = create_engine(pg_uri)
         self.mysql_engine = create_engine(mysql_uri)
         
         # Keep raw connection parameters for transactional queries
-        self.pg_conn_params = { 'dbname': pg_db, 'user': pg_user, 'password': pg_pass, 'host': pg_host, 'port': '5432' }
-        self.mysql_conn_params = { 'host': mysql_host, 'database': mysql_db, 'user': mysql_user, 'password': mysql_pass }
+        self.pg_conn_params = { 
+            'dbname': pg_db, 'user': pg_user, 'password': pg_pass, 
+            'host': pg_host, 'port': pg_port 
+        }
+        self.mysql_conn_params = { 
+            'host': mysql_host, 'database': mysql_db, 'user': mysql_user, 
+            'password': mysql_pass, 'port': mysql_port 
+        }
 
         # Configure LLM
-        load_dotenv()
         api_key = os.getenv("GOOGLE_API_KEY")
         if not api_key: raise ValueError("Google API Key not found.")
         genai.configure(api_key=api_key)
