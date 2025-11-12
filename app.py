@@ -17,7 +17,27 @@ tab1, tab2 = st.tabs(["**AI Navigator**", "**Data Management**"])
 # --- TAB 1: The AI Conversational Interface ---
 # ==============================================================================
 with tab1:
-    st.header("Ask me anything about your career!")
+    st.header("🚀 AI Navigator")
+
+    # --- NEW: B2B Innovation UI ---
+    with st.expander("💼 **Corporate Strategy Forecast (B2B)**"):
+        st.info("Ask a strategic 'Build vs. Buy' question for your company.")
+        corp_prompt = st.text_input("Enter your strategic query:", placeholder="e.g., I'm a manager at Google. What's the fastest way to get 5 'GoLang' developers?")
+        
+        if st.button("Generate Forecast Report", key="b2b_submit"):
+            if corp_prompt:
+                with st.spinner("Analyzing internal talent pool and external job market..."):
+                    # Call the same general query function
+                    response = navigator.execute_general_query(corp_prompt)
+                    # The response is a pre-formatted markdown report
+                    st.markdown(response) 
+            else:
+                st.warning("Please enter a query.")
+
+    st.markdown("---")
+    
+    # --- Your existing B2C Chat UI ---
+    st.header("👤 Personal Career Chat")
     st.write("Examples: 'What jobs are available for my profile, Hritik Shanker?' or 'How many jobs are there at Google in Pune?'")
 
     if "messages" not in st.session_state:
@@ -28,7 +48,7 @@ with tab1:
         with st.chat_message(message["role"]):
             if isinstance(message["content"], tuple):
                 st.markdown(message["content"][0])
-                st.dataframe(message["content"][1], use_container_width=True)
+                st.dataframe(message["content"][1], width='stretch')
             else:
                 st.markdown(str(message["content"]))
 
@@ -47,7 +67,7 @@ with tab1:
                 
                 if isinstance(response, tuple):
                     st.markdown(response[0])
-                    st.dataframe(response[1], use_container_width=True)
+                    st.dataframe(response[1], width='stretch')
                 else:
                     st.markdown(str(response))
         
@@ -67,15 +87,16 @@ with tab2:
 
     @st.cache_data
     def load_data():
-        return navigator.get_all_profiles_data(), navigator.get_all_jobs_data_for_crud()
+        # Updated to get all_skills_list dynamically from the navigator
+        return navigator.get_all_profiles_data(), navigator.get_all_jobs_data_for_crud(), navigator.get_all_skills()
     
-    profiles_df, jobs_df = load_data()
-    all_skills_list = sorted(['Python', 'Java', 'Go', 'JavaScript', 'C++', 'C#', 'TypeScript', 'PHP', 'Ruby', 'Swift', 'Kotlin', 'R', 'Scala', 'Bash Scripting', 'React', 'Angular', 'Vue.js', 'Node.js', 'Django', 'Flask', 'Ruby on Rails', 'ASP.NET', 'HTML5', 'CSS3', 'SQL', 'NoSQL', 'MongoDB', 'PostgreSQL', 'MySQL', 'SQL Server', 'Oracle', 'Redis', 'Cassandra', 'Elasticsearch', 'Machine Learning', 'Statistics', 'Deep Learning', 'TensorFlow', 'PyTorch', 'Scikit-learn', 'Pandas', 'NumPy', 'NLP', 'Computer Vision', 'Data Warehousing', 'ETL', 'Cloud (AWS)', 'Cloud (Azure)', 'Cloud (GCP)', 'Docker', 'Kubernetes', 'CI/CD', 'Terraform', 'Ansible', 'Jenkins', 'Git', 'PowerBI', 'Tableau', 'Qlik Sense', 'Looker', 'Data Visualization', 'Agile', 'Scrum', 'JIRA', 'Communication', 'Project Management', 'Stakeholder Management', 'Kanban', 'Microservices', 'REST APIs', 'System Design', 'Object-Oriented Programming (OOP)', 'Data Structures & Algorithms', 'iOS Development', 'Android Development', 'React Native', 'Flutter', 'Selenium', 'Test Automation', 'Cypress', 'API Testing'])
-    
+    profiles_df, jobs_df, all_skills_list = load_data()
+        
     st.markdown("---")
     
     st.subheader("👤 Profiles Database (PostgreSQL)")
-    st.dataframe(profiles_df, use_container_width=True)
+    # This dataframe will now correctly show the 'companyname' column
+    st.dataframe(profiles_df, width='stretch')
     
     col1, col2, col3 = st.columns(3)
 
@@ -83,32 +104,41 @@ with tab2:
         with st.form("add_profile_form", clear_on_submit=True):
             p_name = st.text_input("Full Name*")
             p_headline = st.text_input("Headline")
+            p_company = st.text_input("Company Name*")
             p_exp = st.number_input("Years of Experience", 0, 50)
             p_skills = st.multiselect("Skills*", options=all_skills_list, key="add_p_skills")
             if st.form_submit_button("Add Profile"):
-                if p_name and p_skills:
-                    if navigator.register_new_user(p_name, p_headline, p_exp, p_skills): st.success("Profile added!")
+                if p_name and p_skills and p_company:
+                    if navigator.register_new_user(p_name, p_headline, p_exp, p_skills, p_company): 
+                        st.success("Profile added!")
                     else: st.error("Failed to add profile.")
-                else: st.warning("Name and skills are required.")
+                else: st.warning("Name, Company, and Skills are required.")
 
     with col2.expander("✏️ Edit Profile"):
         if not profiles_df.empty:
+            # Use 'fullname' from the dataframe
             profile_to_edit_name = st.selectbox("Select Profile to Edit", options=profiles_df['fullname'])
             profile_details = profiles_df[profiles_df['fullname'] == profile_to_edit_name].iloc[0]
             with st.form("edit_profile_form"):
                 up_name = st.text_input("Full Name*", value=profile_details['fullname'])
                 up_headline = st.text_input("Headline", value=profile_details['headline'])
+                # Handle companyname, which might be None or not exist in old data
+                company_val = str(profile_details.get('companyname', ''))
+                up_company = st.text_input("Company Name*", value=company_val) # <-- ADDED
                 up_exp = st.number_input("Years of Experience", 0, 50, value=int(profile_details['yearsofexperience']))
                 current_skills = [s.strip() for s in profile_details['skills'].split(',') if s.strip()] if pd.notna(profile_details['skills']) else []
                 up_skills = st.multiselect("Skills*", options=all_skills_list, default=current_skills, key="edit_p_skills")
                 if st.form_submit_button("Update Profile"):
-                    if up_name and up_skills:
-                        if navigator.update_profile(int(profile_details['profileid']), up_name, up_headline, up_exp, up_skills): st.success("Profile updated!")
+                    if up_name and up_skills and up_company: # <-- ADDED up_company check
+                        # Added up_company to the function call
+                        if navigator.update_profile(int(profile_details['profileid']), up_name, up_headline, up_exp, up_skills, up_company): 
+                            st.success("Profile updated!")
                         else: st.error("Failed to update profile.")
-                    else: st.warning("Name and skills are required.")
+                    else: st.warning("Name, Company, and Skills are required.")
 
     with col3.expander("🗑️ Delete Profile"):
         if not profiles_df.empty:
+            # Use 'fullname' from the dataframe
             profile_to_delete_name = st.selectbox("Select Profile to Delete", options=profiles_df['fullname'], key="delete_p_select")
             if st.button("Delete Profile"):
                 profile_id_to_delete = int(profiles_df[profiles_df['fullname'] == profile_to_delete_name]['profileid'].iloc[0])
@@ -118,7 +148,7 @@ with tab2:
     st.markdown("---")
 
     st.subheader("💼 Jobs Database (MySQL)")
-    st.dataframe(jobs_df, use_container_width=True)
+    st.dataframe(jobs_df, width='stretch')
     
     col4, col5, col6 = st.columns(3)
 

@@ -54,11 +54,12 @@ class CareerNavigator:
         Analyze the user's query to classify its intent and extract entities.
 
         **Intents:**
-        - 'CAREER_PATH': User wants a skill gap analysis for a specific job. This is the intent if a user provides their name and asks "what skills do I need for...".
-        - 'FIND_JOBS': User wants to find job listings with optional filters like company, location, or job title.
+        - 'CAREER_PATH': User wants a skill gap analysis for a specific job.
+        - 'FIND_JOBS': User wants to find job listings with optional filters.
         - 'ELIGIBLE_JOBS': User wants to find jobs that match their own profile's skills.
-        - 'SKILL_LOOKUP': User wants a simple list of skills for a job, without personalization. This is the intent for queries like "list skills for...".
+        - 'SKILL_LOOKUP': User wants a simple list of skills for a job, without personalization.
         - 'USER_SKILL_LOOKUP': User wants to list the skills of a specific person.
+        - 'SKILL_FORECAST': A manager wants a "Build vs. Buy" analysis for a role at their company.
         - 'UNKNOWN': The query is unclear.
 
         **Entities to Extract:**
@@ -75,6 +76,7 @@ class CareerNavigator:
         - Query: "My name is Suhani and I want to get job in Google as data analyst. What skills do I need?" -> {{"intent": "CAREER_PATH", "user_name": "Suhani", "company_name": "Google", "target_job": "data analyst", "location": null}}
         - Query: "list all skills needed for data scientist in Google" -> {{"intent": "SKILL_LOOKUP", "user_name": null, "company_name": "Google", "target_job": "data scientist", "location": null}}
         - Query: "My name is Dewansh, what jobs am I eligible for?" -> {{"intent": "ELIGIBLE_JOBS", "user_name": "Dewansh", "company_name": null, "target_job": null, "location": null}}
+        - Query: "I'm a manager at Google. What's the fastest way to get 5 'GoLang' developers?" -> {{"intent": "SKILL_FORECAST", "user_name": null, "company_name": "Google", "target_job": "GoLang developer", "location": null}}
         
         **User Query:** "{query}"
 
@@ -82,7 +84,9 @@ class CareerNavigator:
         """
         try:
             response = self.llm.generate_content(intent_prompt)
-            analysis = json.loads(response.text.strip().replace("```json", "").replace("```", ""))
+            # Clean the JSON response
+            json_text = response.text.strip().replace("```json", "").replace("```", "")
+            analysis = json.loads(json_text)
             intent = analysis.get("intent")
             
             if intent == "CAREER_PATH": return self.run_dynamic_query(analysis)
@@ -90,9 +94,11 @@ class CareerNavigator:
             elif intent == "ELIGIBLE_JOBS": return self.find_eligible_jobs_for_user(analysis.get("user_name"))
             elif intent == "SKILL_LOOKUP": return self.get_skills_for_job(analysis.get("target_job"), analysis.get("company_name"))
             elif intent == "USER_SKILL_LOOKUP": return self.get_skills_for_user(analysis.get("user_name"))
-            else: return "Sorry, I can only answer questions about career paths, job eligibility, job listings, or skills for specific roles/users."
+            elif intent == "SKILL_FORECAST": return self.run_skill_forecast(analysis.get("company_name"), analysis.get("target_job"))
+            else: return "Sorry, I can only answer questions about career paths, job eligibility, job listings, skills, or corporate skill forecasts."
         except Exception as e:
             print(f"Error in general query execution: {e}")
+            print(f"Failed to parse LLM response: {response.text}")
             return "Sorry, I had trouble understanding your request."
 
     def find_eligible_jobs_for_user(self, user_name):
@@ -262,12 +268,147 @@ class CareerNavigator:
         except Exception as e:
             return f"An error occurred while generating the learning path: {e}"
 
+    def get_internal_skill_audit(self, company_name, target_skills):
+        """
+        Analyzes the internal employee database (Postgres) for upskilling potential,
+        pre-filtered by a list of target skills.
+        
+        This function ONLY returns the raw data.
+        """
+        try:
+            if not target_skills:
+                # No skills to search for
+                return pd.DataFrame() 
+
+            # Create placeholders for the SQL IN clause
+            skill_placeholders = ', '.join(['%s'] * len(target_skills))
+            
+            # Find employees at the company who have AT LEAST 2 of the required skills
+            # Order by the best candidates (most skills) first
+            sql = f"""
+                SELECT p.FullName, STRING_AGG(s.SkillName, ', ') AS Skills, COUNT(s.SkillName) as SkillCount
+                FROM Profiles p
+                JOIN Profile_Skills_Mapping psm ON p.ProfileID = psm.ProfileID
+                JOIN Skills s ON psm.SkillID = s.SkillID
+                WHERE p.CompanyName = %s
+                AND s.SkillName IN ({skill_placeholders})
+                GROUP BY p.ProfileID, p.FullName
+                HAVING COUNT(DISTINCT s.SkillName) >= 2
+                ORDER BY SkillCount DESC
+                LIMIT 10; 
+            """
+            
+            # Parameters for the query
+            params = (company_name,) + tuple(target_skills)
+            
+            internal_employees_df = pd.read_sql_query(sql, self.pg_engine, params=params)
+            
+            return internal_employees_df
+
+        except Exception as e:
+            print(f"Error in internal skill audit SQL: {e}")
+            return pd.DataFrame() # Return empty dataframe on error
+                
+    def get_external_market_analysis(self, target_job_title):
+        """
+        Analyzes the external job market (MySQL) for hiring data.
+        """
+        try:
+            sql = "SELECT COUNT(DISTINCT j.JobID) AS JobCount, GROUP_CONCAT(DISTINCT j.Location SEPARATOR ', ') AS Locations FROM Jobs j WHERE j.JobTitle LIKE %s"
+            params = (f"%{target_job_title}%",)
+            df = pd.read_sql_query(sql, self.mysql_engine, params=params)
+            
+            if df.empty or df.iloc[0]['JobCount'] == 0:
+                return {"open_jobs_count": 0, "common_locations": "N/A"}
+            
+            all_locations = df.iloc[0]['Locations'].split(', ')
+            common_locations = pd.Series(all_locations).value_counts().head(3).index.tolist()
+
+            return {
+                "open_jobs_count": int(df.iloc[0]['JobCount']),
+                "common_locations": ", ".join(common_locations)
+            }
+        except Exception as e:
+            print(f"Error in external market analysis: {e}")
+            return {"open_jobs_count": 0, "common_locations": "N/A"}
+
+    def run_skill_forecast(self, company_name, target_job_title):
+        """
+        Runs the full "Build vs. Buy" analysis and generates a report.
+        """
+        if not company_name or not target_job_title:
+            return "To generate a forecast, please specify your company and the target job title (e.g., 'Data Scientist')."
+        
+        # --- ROBUST LOGIC ---
+        # 1. Get Target Skills from MySQL
+        try:
+            # First, try to get MANDATORY skills
+            sql_mandatory = "SELECT DISTINCT s.SkillName FROM Skills s JOIN Job_Skills_Mapping jsm ON s.SkillID = jsm.SkillID JOIN Jobs j ON jsm.JobID = j.JobID WHERE j.JobTitle LIKE %s AND jsm.Importance = 'Mandatory'"
+            params = (f"%{target_job_title}%",)
+            target_skills_df = pd.read_sql_query(sql_mandatory, self.mysql_engine, params=params)
+            
+            target_skills = target_skills_df['SkillName'].tolist()
+
+            # 2. FALLBACK: If no mandatory skills, get ALL skills
+            if not target_skills:
+                print("No mandatory skills found, falling back to all skills.")
+                sql_all = "SELECT DISTINCT s.SkillName FROM Skills s JOIN Job_Skills_Mapping jsm ON s.SkillID = jsm.SkillID JOIN Jobs j ON jsm.JobID = j.JobID WHERE j.JobTitle LIKE %s"
+                target_skills_df = pd.read_sql_query(sql_all, self.mysql_engine, params=params)
+                target_skills = target_skills_df['SkillName'].tolist()
+
+        except Exception as e:
+            print(f"Error getting target skills for forecast: {e}")
+            target_skills = []
+        
+        # 3. Federate: Call your helper functions
+        # This now returns a DataFrame
+        internal_candidates_df = self.get_internal_skill_audit(company_name, target_skills)
+        # This returns a dict
+        external_data = self.get_external_market_analysis(target_job_title)
+        
+        # 4. Convert internal data to a compact JSON for the prompt
+        if not internal_candidates_df.empty:
+            internal_data_json = internal_candidates_df.to_json(orient="records")
+            internal_total_count = len(internal_candidates_df)
+        else:
+            internal_data_json = "[]"
+            internal_total_count = 0
+        
+        # 5. Integrate & Generate ONE Report (The single LLM call)
+        prompt = f"""
+        You are a top-tier HR Strategy consultant for {company_name}.
+        I need a "Build vs. Buy" strategic report for the role of '{target_job_title}'.
+        Use the following federated data to write your recommendation.
+        Use markdown for formatting. Be concise and professional.
+
+        **Internal Data (Our Company - {company_name}):**
+        - Total Pre-filtered Employees (with >=2 relevant skills): {internal_total_count}
+        - Top 10 High-Potential Employees (JSON): {internal_data_json}
+
+        **External Market Data (Hiring):**
+        - Current open jobs for '{target_job_title}': {external_data['open_jobs_count']}
+        - Top 3 hiring locations: {external_data['common_locations']}
+
+        **Your Report:**
+        (Start with a '## Strategic Recommendation' section offering a clear "Build", "Buy", or "Hybrid" suggestion. 
+        Then create two sections: '### Build (Internal Upskilling)' and '### Buy (External Hiring)'.
+        In the 'Build' section, **explicitly mention the names** of the high-potential employees from the JSON, if any.)
+        """
+        
+        try:
+            response = self.llm.generate_content(prompt)
+            return response.text
+        except Exception as e:
+            print(f"Error generating final forecast report: {e}")
+            return "Sorry, an error occurred while generating the strategic report."
+
     # --- Profile CRUD Operations ---
-    def register_new_user(self, name, headline, experience, skills):
+    def register_new_user(self, name, headline, experience, skills, company_name): # Added company_name
         try:
             with psycopg2.connect(**self.pg_conn_params) as conn:
                 with conn.cursor() as cur:
-                    cur.execute("INSERT INTO Profiles (FullName, Headline, YearsOfExperience) VALUES (%s, %s, %s) RETURNING ProfileID;", (name, headline, experience))
+                    # Added CompanyName to INSERT
+                    cur.execute("INSERT INTO Profiles (FullName, Headline, YearsOfExperience, CompanyName) VALUES (%s, %s, %s, %s) RETURNING ProfileID;", (name, headline, experience, company_name))
                     profile_id = cur.fetchone()[0]
                     if skills:
                         skill_ids_query = f"SELECT SkillID FROM Skills WHERE SkillName IN ({','.join(['%s'] * len(skills))})"
@@ -280,11 +421,12 @@ class CareerNavigator:
             print(f"Error in register_new_user: {e}")
             return False
 
-    def update_profile(self, profile_id, name, headline, experience, skills):
+    def update_profile(self, profile_id, name, headline, experience, skills, company_name): # Added company_name
         try:
             with psycopg2.connect(**self.pg_conn_params) as conn:
                 with conn.cursor() as cur:
-                    cur.execute("UPDATE Profiles SET FullName = %s, Headline = %s, YearsOfExperience = %s WHERE ProfileID = %s;", (name, headline, experience, profile_id))
+                    # Added CompanyName to UPDATE
+                    cur.execute("UPDATE Profiles SET FullName = %s, Headline = %s, YearsOfExperience = %s, CompanyName = %s WHERE ProfileID = %s;", (name, headline, experience, company_name, profile_id))
                     cur.execute("DELETE FROM Profile_Skills_Mapping WHERE ProfileID = %s;", (profile_id,))
                     if skills:
                         skill_ids_query = f"SELECT SkillID FROM Skills WHERE SkillName IN ({','.join(['%s'] * len(skills))})"
@@ -297,6 +439,26 @@ class CareerNavigator:
             print(f"Error in update_profile: {e}")
             return False
     
+    def get_all_skills(self):
+        """Fetches a complete, sorted list of all unique skills from both databases."""
+        try:
+            sql_pg = "SELECT DISTINCT SkillName FROM Skills;"
+            sql_mysql = "SELECT DISTINCT SkillName FROM Skills;"
+            
+            df_pg = pd.read_sql_query(sql_pg, self.pg_engine)
+            df_mysql = pd.read_sql_query(sql_mysql, self.mysql_engine)
+            
+            # Combine, drop any null/NaN values, convert all to string, get unique
+            all_skills_series = pd.concat([df_pg, df_mysql])['SkillName'].dropna().astype(str)
+            
+            # Sort the unique list
+            all_skills_list = sorted(all_skills_series.unique())
+            
+            return all_skills_list
+        except Exception as e:
+            print(f"Error fetching all skills: {e}")
+            return [] # Fallback
+
     def delete_profile(self, profile_id):
         try:
             with psycopg2.connect(**self.pg_conn_params) as conn:
@@ -323,6 +485,7 @@ class CareerNavigator:
                             importance = importance_map.get(skill_name, 'Preferred')
                             if skill_id:
                                 cur.execute("INSERT INTO Job_Skills_Mapping (JobID, SkillID, Importance) VALUES (%s, %s, %s);", (job_id, skill_id, importance))
+                conn.commit() 
             return True
         except Exception as e:
             print(f"Error in add_job: {e}")
@@ -343,6 +506,7 @@ class CareerNavigator:
                             importance = importance_map.get(skill_name, 'Preferred')
                             if skill_id:
                                 cur.execute("INSERT INTO Job_Skills_Mapping (JobID, SkillID, Importance) VALUES (%s, %s, %s);", (job_id, skill_id, importance))
+                conn.commit()
             return True
         except Exception as e:
             print(f"Error in update_job: {e}")
@@ -356,6 +520,7 @@ class CareerNavigator:
                     cur.execute("DELETE FROM Jobs WHERE JobID = %s;", (job_id,))
                     cur.execute("DELETE FROM Job_Skills_Mapping WHERE JobID = %s;", (job_id,))
                     cur.execute("SET FOREIGN_KEY_CHECKS=1;")
+                conn.commit()
             return True
         except Exception as e:
             print(f"Error in delete_job: {e}")
@@ -364,12 +529,12 @@ class CareerNavigator:
     # --- Data Fetching for Display ---
     def get_all_profiles_data(self):
         try:
-            sql = "SELECT p.ProfileID, p.FullName, p.Headline, p.YearsOfExperience, STRING_AGG(s.SkillName, ', ') AS Skills FROM Profiles p LEFT JOIN Profile_Skills_Mapping psm ON p.ProfileID = psm.ProfileID LEFT JOIN Skills s ON psm.SkillID = s.SkillID GROUP BY p.ProfileID ORDER BY p.FullName;"
+            sql = "SELECT p.ProfileID, p.FullName, p.Headline, p.YearsOfExperience, p.CompanyName, STRING_AGG(s.SkillName, ', ') AS Skills FROM Profiles p LEFT JOIN Profile_Skills_Mapping psm ON p.ProfileID = psm.ProfileID LEFT JOIN Skills s ON psm.SkillID = s.SkillID GROUP BY p.ProfileID ORDER BY p.FullName;"
             return pd.read_sql_query(sql, self.pg_engine)
         except Exception as e:
             print(f"Error fetching profiles data: {e}")
             return pd.DataFrame()
-
+        
     def get_all_jobs_data_for_crud(self):
         try:
             sql = "SELECT j.JobID, j.JobTitle, j.CompanyName, j.Location, GROUP_CONCAT(s.SkillName SEPARATOR ', ') AS RequiredSkills FROM Jobs j LEFT JOIN Job_Skills_Mapping jsm ON j.JobID = jsm.JobID LEFT JOIN Skills s ON jsm.SkillID = s.SkillID GROUP BY j.JobID ORDER BY j.CompanyName, j.JobTitle;"
