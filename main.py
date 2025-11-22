@@ -190,7 +190,7 @@ class CareerNavigator:
             skill_placeholders = ', '.join(['%s'] * len(user_skills))
             sql = f"""SELECT j.JobTitle, j.CompanyName, j.Location, (SUM(CASE WHEN s.SkillName IN ({skill_placeholders}) THEN 1 ELSE 0 END) / COUNT(DISTINCT jsm.SkillID)) * 100 AS MatchPercentage FROM Jobs j LEFT JOIN Job_Skills_Mapping jsm ON j.JobID = jsm.JobID LEFT JOIN Skills s ON jsm.SkillID = s.SkillID GROUP BY j.JobID HAVING SUM(CASE WHEN s.SkillName IN ({skill_placeholders}) THEN 1 ELSE 0 END) > 0 ORDER BY MatchPercentage DESC LIMIT 50;"""
             params = user_skills * 2
-            df = pd.read_sql_query(sql, self.mysql_engine, params=params)
+            df = pd.read_sql_query(sql, self.mysql_engine, params=tuple(params))
             return df[df['MatchPercentage'] >= threshold]
         except Exception as e:
             print(f"Error finding matching jobs: {e}")
