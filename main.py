@@ -8,6 +8,7 @@ import json
 from rapidfuzz import process, fuzz
 import pandas as pd
 from sqlalchemy import create_engine
+import traceback
 
 class CareerNavigator:
     def __init__(self):
@@ -57,6 +58,8 @@ class CareerNavigator:
         - 'CAREER_PATH': User wants a skill gap analysis for a specific job.
         - 'FIND_JOBS': User wants to find job listings with optional filters.
         - 'ELIGIBLE_JOBS': User wants to find jobs that match their own profile's skills.
+        - 'CANDIDATE_SEARCH': User wants to find people who are eligible for a specified job title (e.g., 'List all candidates for data scientist jobs').
+        - 'PROFILE_AGGREGATION': User wants to count or aggregate profiles based on skills, company, or experience (e.g., 'How many candidates have Python skill?').
         - 'SKILL_LOOKUP': User wants a simple list of skills for a job, without personalization.
         - 'USER_SKILL_LOOKUP': User wants to list the skills of a specific person.
         - 'SKILL_FORECAST': A manager wants a "Build vs. Buy" analysis for a role at their company.
@@ -67,16 +70,15 @@ class CareerNavigator:
         - 'company_name': The name of a company.
         - 'target_job': A specific job title.
         - 'location': A city or geographical area.
+        - 'target_skill': A specific skill for aggregation.
 
         **Instructions:**
         - Return ONLY a raw JSON object.
         - If an entity is not mentioned, its value must be null.
 
         **Examples:**
-        - Query: "My name is Suhani and I want to get job in Google as data analyst. What skills do I need?" -> {{"intent": "CAREER_PATH", "user_name": "Suhani", "company_name": "Google", "target_job": "data analyst", "location": null}}
-        - Query: "list all skills needed for data scientist in Google" -> {{"intent": "SKILL_LOOKUP", "user_name": null, "company_name": "Google", "target_job": "data scientist", "location": null}}
-        - Query: "My name is Dewansh, what jobs am I eligible for?" -> {{"intent": "ELIGIBLE_JOBS", "user_name": "Dewansh", "company_name": null, "target_job": null, "location": null}}
-        - Query: "I'm a manager at Google. What's the fastest way to get 5 'GoLang' developers?" -> {{"intent": "SKILL_FORECAST", "user_name": null, "company_name": "Google", "target_job": "GoLang developer", "location": null}}
+        - Query: "How many people have the skill Machine Learning?" -> {{"intent": "PROFILE_AGGREGATION", "user_name": null, "company_name": null, "target_job": null, "location": null, "target_skill": "Machine Learning"}}
+        - Query: "List all candidates which are eligible for data scientist jobs" -> {{"intent": "CANDIDATE_SEARCH", "user_name": null, "company_name": null, "target_job": "data scientist", "location": null, "target_skill": null}}
         
         **User Query:** "{query}"
 
@@ -92,6 +94,8 @@ class CareerNavigator:
             if intent == "CAREER_PATH": return self.run_dynamic_query(analysis)
             elif intent == "FIND_JOBS": return self.find_jobs_by_criteria(analysis.get("company_name"), analysis.get("target_job"), analysis.get("location"))
             elif intent == "ELIGIBLE_JOBS": return self.find_eligible_jobs_for_user(analysis.get("user_name"))
+            elif intent == "CANDIDATE_SEARCH": return self.find_eligible_candidates_for_job(analysis.get("target_job"))
+            elif intent == "PROFILE_AGGREGATION": return self.aggregate_profile_query(analysis.get("target_skill"), analysis.get("company_name"))
             elif intent == "SKILL_LOOKUP": return self.get_skills_for_job(analysis.get("target_job"), analysis.get("company_name"))
             elif intent == "USER_SKILL_LOOKUP": return self.get_skills_for_user(analysis.get("user_name"))
             elif intent == "SKILL_FORECAST": return self.run_skill_forecast(analysis.get("company_name"), analysis.get("target_job"))
@@ -102,6 +106,157 @@ class CareerNavigator:
             if 'response' in locals() and hasattr(response, 'text'):
                 print(f"Failed to parse LLM response: {response.text}")
             return "Sorry, I had trouble understanding your request."
+    
+    def aggregate_profile_query(self, target_skill=None, company_name=None):
+        """
+        Handles PROFILE_AGGREGATION intent. Counts profiles matching criteria (e.g., by skill).
+        """
+        if not target_skill and not company_name:
+            return "Please specify a skill or company name for aggregation."
+
+        try:
+            sql = """
+                SELECT COUNT(DISTINCT p.ProfileID)
+                FROM Profiles p
+            """
+            params = []
+            
+            if target_skill:
+                # Need to join with skills mapping
+                sql += " JOIN Profile_Skills_Mapping psm ON p.ProfileID = psm.ProfileID JOIN Skills s ON psm.SkillID = s.SkillID"
+            
+            conditions = []
+            
+            if target_skill:
+                conditions.append("s.SkillName ILIKE %s")
+                params.append(f"%{target_skill}%")
+                
+            if company_name:
+                conditions.append("p.CompanyName ILIKE %s")
+                params.append(f"%{company_name}%")
+                
+            if conditions:
+                sql += " WHERE " + " AND ".join(conditions)
+
+            # Execute the query against the Postgres engine
+            df = pd.read_sql_query(sql, self.pg_engine, params=tuple(params))
+            
+            count = df.iloc[0][0]
+            
+            # --- Task 3 Innovation: Contextual Output ---
+            criteria = []
+            if target_skill: criteria.append(f"the skill **{target_skill}**")
+            if company_name: criteria.append(f"currently working at **{company_name}**")
+            
+            criteria_str = " and ".join(criteria)
+            
+            if count == 0:
+                response = f"I found **{count}** candidates matching the criteria ({criteria_str})."
+            else:
+                response = f"There are **{count}** candidates in the database matching the criteria ({criteria_str})."
+            
+            return response
+            
+        except Exception as e:
+            print(f"Error in aggregate_profile_query: {e}")
+            return "Sorry, an error occurred while calculating the profile aggregation."
+
+    def find_eligible_candidates_for_job(self, target_job_title):
+        """
+        Handles CANDIDATE_SEARCH intent. Multi-step federation: MySQL (Job Skills) -> Postgres (Profiles).
+        """
+        if not target_job_title:
+            return "Please specify a job title to search for eligible candidates."
+
+        # 1. Fetch skills required for the target job (from MySQL)
+        target_skills = self.get_all_skills_for_job_title(target_job_title)
+        
+        if not target_skills:
+            return f"Could not find any jobs with the title '{target_job_title}' to extract required skills."
+
+        # 2. Find profiles matching those skills (query Postgres)
+        # Use a high threshold (60%) for eligibility
+        matching_candidates_df = self.find_matching_candidates(target_skills, threshold=60)
+        
+        if matching_candidates_df.empty:
+            return f"No candidates were found who match at least 60% of the required skills for a **{target_job_title}** role."
+
+        # 3. Task 3 Innovation: Integrate and Render
+        total_candidates = len(matching_candidates_df)
+        
+        summary_prompt = f"""
+        You are an HR recruiter. The user requested a list of eligible candidates for the job title: '{target_job_title}'.
+        
+        The database returned {total_candidates} candidates matching at least 60% of the required skills.
+        
+        Based on this, generate a professional, contextual summary that:
+        1. Confirms the search (e.g., "Found X candidates...").
+        2. Lists the top 3 companies where these eligible candidates currently work.
+        3. Presents the final data table.
+        
+        Use markdown for formatting.
+        """
+        
+        try:
+            summary_response = self.llm.generate_content(summary_prompt).text
+            # Return the generated text and the DataFrame
+            return summary_response, matching_candidates_df
+        except Exception as e:
+            print(f"Error generating candidate search summary: {e}")
+            return f"Found {total_candidates} candidates eligible for **{target_job_title}**. See the table for details.", matching_candidates_df
+
+    def find_matching_candidates(self, required_skills, threshold=0):
+        """
+        Finds profiles in Postgres that match a percentage of the required skills.
+        """
+        if not required_skills: return pd.DataFrame()
+        try:
+            # Create placeholders for the SQL IN clause
+            skill_placeholders = ', '.join(['%s'] * len(required_skills))
+            
+            # The SQL calculates the percentage of the REQUIRED skills that the candidate possesses
+            sql = f"""
+                SELECT 
+                    p.FullName, 
+                    p.Headline, 
+                    p.YearsOfExperience, 
+                    p.CompanyName,
+                    STRING_AGG(s.SkillName, ', ') AS MatchedSkills, 
+                    (COUNT(DISTINCT s.SkillName) * 100.0 / %s) AS MatchPercentage
+                FROM Profiles p
+                JOIN Profile_Skills_Mapping psm ON p.ProfileID = psm.ProfileID
+                JOIN Skills s ON psm.SkillID = s.SkillID
+                WHERE s.SkillName IN ({skill_placeholders})
+                GROUP BY p.ProfileID, p.FullName, p.Headline, p.YearsOfExperience, p.CompanyName
+                HAVING (COUNT(DISTINCT s.SkillName) * 100.0 / %s) >= %s
+                ORDER BY MatchPercentage DESC
+                LIMIT 50;
+            """
+            
+            num_required_skills = len(required_skills)
+            # FIX: Ensure parameters are passed in the correct order for the 3 placeholders: %s (count), skill_placeholders, %s (count), %s (threshold)
+            params = (num_required_skills,) + tuple(required_skills) + (num_required_skills, threshold)
+
+            df = pd.read_sql_query(sql, self.pg_engine, params=params)
+            
+            # Rename columns for clarity in output
+            df = df.rename(columns={'fullname': 'Candidate Name', 'companyname': 'Current Company', 'yearsofexperience': 'YoE', 'headline': 'Headline'})
+            return df
+        except Exception as e:
+            print(f"Error finding matching candidates: {e}")
+            print(traceback.format_exc())
+            return pd.DataFrame()
+
+    def get_all_skills_for_job_title(self, job_title):
+        """Fetches all unique skills required across all jobs matching a title."""
+        try:
+            sql = "SELECT DISTINCT s.SkillName FROM Skills s JOIN Job_Skills_Mapping jsm ON s.SkillID = jsm.SkillID JOIN Jobs j ON jsm.JobID = j.JobID WHERE j.JobTitle LIKE %s"
+            params = (f"%{job_title}%",)
+            df = pd.read_sql_query(sql, self.mysql_engine, params=params)
+            return df['SkillName'].tolist()
+        except Exception as e:
+            print(f"Error fetching job skills for candidate search: {e}")
+            return []
 
     def find_eligible_jobs_for_user(self, user_name):
         """
@@ -122,7 +277,6 @@ class CareerNavigator:
         user_skills = self.get_user_skills(profile_id)
         
         # --- Task 3 Innovation: Federation Output Enhancement Module (Step 1) ---
-        # Use LLM to generate the welcoming, contextual summary of the profile
         profile_summary_prompt = f"""
         You are a career coach. Based on the following user data, generate a welcoming summary of their profile and a brief assessment of their skills' potential.
         - Name: {full_name}
@@ -137,7 +291,6 @@ class CareerNavigator:
             profile_summary = self.llm.generate_content(profile_summary_prompt).text
         except Exception as e:
             print(f"Error generating profile summary: {e}")
-            # Fallback text if LLM fails
             profile_summary = f"Hello **{full_name}**! We've retrieved your profile: {headline} with {experience} years of experience at {company_name}. Skills: {', '.join(user_skills)}."
 
 
@@ -148,12 +301,9 @@ class CareerNavigator:
         matching_jobs = self.find_matching_jobs(user_skills, threshold=40)
         
         if not matching_jobs.empty:
-            # Append job count to the LLM-generated profile summary
             response_text = f"{profile_summary}\n\n---\n\n### Eligible Jobs Found\nFound **{len(matching_jobs)}** jobs that could be a great fit based on your skills (Match $\geq$ 40%):"
-            # Return the descriptive text and the DataFrame for Streamlit to render
             return response_text, matching_jobs
         else:
-            # If no jobs match, give a direct and helpful suggestion
             top_skills = self.get_top_skills(limit=3)
             return f"{profile_summary}\n\nSorry **{full_name}**, no jobs were found with a significant match to your current skills. The top 3 most in-demand skills right now are **{', '.join(top_skills)}**. Focusing on one of these could greatly improve your job prospects!"
 
@@ -238,18 +388,14 @@ class CareerNavigator:
                 LIMIT 50;
             """
             
-            # --- FIX APPLIED HERE ---
             # The parameter list must contain the list of skills repeated three times (for the three IN clauses) 
             # followed by the threshold (for the >= %s clause).
             params = tuple(user_skills) * 3 + (threshold,)
-            # --- END FIX ---
 
             df = pd.read_sql_query(sql, self.mysql_engine, params=params)
             return df
         except Exception as e:
             print(f"Error finding matching jobs: {e}")
-            # Also log the full exception details
-            import traceback
             print(traceback.format_exc())
             return pd.DataFrame()
 
