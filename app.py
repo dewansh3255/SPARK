@@ -9,36 +9,17 @@ def load_navigator():
     return CareerNavigator()
 navigator = load_navigator()
 
-st.title("🚀 SPARK: Your AI Career Navigator")
+st.title("🚀 SPARK: Your AI Career Navigator (Generalized System)")
 
 tab1, tab2 = st.tabs(["**AI Navigator**", "**Data Management**"])
 
 # ==============================================================================
-# --- TAB 1: The AI Conversational Interface ---
+# --- TAB 1: The AI Conversational Interface (Now Fully Generalized) ---
 # ==============================================================================
 with tab1:
-    st.header("🚀 AI Navigator")
-
-    # --- NEW: B2B Innovation UI ---
-    with st.expander("💼 **Corporate Strategy Forecast (B2B)**"):
-        st.info("Ask a strategic 'Build vs. Buy' question for your company.")
-        corp_prompt = st.text_input("Enter your strategic query:", placeholder="e.g., I'm a manager at Google. What's the fastest way to get 5 'GoLang' developers?")
-        
-        if st.button("Generate Forecast Report", key="b2b_submit"):
-            if corp_prompt:
-                with st.spinner("Analyzing internal talent pool and external job market..."):
-                    # Call the same general query function
-                    response = navigator.execute_general_query(corp_prompt)
-                    # The response is a pre-formatted markdown report
-                    st.markdown(response) 
-            else:
-                st.warning("Please enter a query.")
-
-    st.markdown("---")
-    
-    # --- Your existing B2C Chat UI ---
-    st.header("👤 Personal Career Chat")
-    st.write("Examples: 'What jobs are available for my profile, Hritik Shanker?' or 'How many jobs are there at Google in Pune?'")
+    st.header("👤 General Query Chat")
+    st.write("Ask any question about profiles or jobs, and the AI will generate and execute the necessary database query dynamically.")
+    st.write("Examples: 'What jobs are available at Google in Pune?' or 'List the skills of Hritik Shanker.'")
 
     if "messages" not in st.session_state:
         st.session_state.messages = []
