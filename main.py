@@ -87,7 +87,7 @@ class CareerNavigator:
         try:
             response = self.llm.generate_content(intent_prompt)
             # Clean the JSON response
-            json_text = response.text.strip().replace("```json", "").replace("```", "")
+            json_text = response.text.strip().replace("```json", "").replace("```", "").strip()
             analysis = json.loads(json_text)
             intent = analysis.get("intent")
             
@@ -100,12 +100,16 @@ class CareerNavigator:
             elif intent == "USER_SKILL_LOOKUP": return self.get_skills_for_user(analysis.get("user_name"))
             elif intent == "SKILL_FORECAST": return self.run_skill_forecast(analysis.get("company_name"), analysis.get("target_job"))
             else: return "Sorry, I can only answer questions about career paths, job eligibility, job listings, skills, or corporate skill forecasts."
+        
+        except json.JSONDecodeError as e:
+            print(f"JSON parsing error: {e}")
+            print(f"LLM Response: {response.text if 'response' in locals() else 'No response'}")
+            return "I'm having trouble understanding your question. Could you rephrase it more clearly? For example: 'Find jobs at Google' or 'What skills does John Doe have?'"
+        
         except Exception as e:
-            # Added more robust error handling for LLM failure
             print(f"Error in general query execution: {e}")
-            if 'response' in locals() and hasattr(response, 'text'):
-                print(f"Failed to parse LLM response: {response.text}")
-            return "Sorry, I had trouble understanding your request."
+            traceback.print_exc()
+            return "Sorry, I encountered an error processing your request. Please try again."
     
     def aggregate_profile_query(self, target_skill=None, company_name=None):
         """
@@ -159,6 +163,7 @@ class CareerNavigator:
             
         except Exception as e:
             print(f"Error in aggregate_profile_query: {e}")
+            traceback.print_exc()
             return "Sorry, an error occurred while calculating the profile aggregation."
 
     def find_eligible_candidates_for_job(self, target_job_title):
@@ -217,34 +222,31 @@ class CareerNavigator:
             # The SQL calculates the percentage of the REQUIRED skills that the candidate possesses
             sql = f"""
                 SELECT 
-                    p.FullName, 
-                    p.Headline, 
-                    p.YearsOfExperience, 
-                    p.CompanyName,
-                    STRING_AGG(s.SkillName, ', ') AS MatchedSkills, 
-                    (COUNT(DISTINCT s.SkillName) * 100.0 / %s) AS MatchPercentage
+                    p.FullName as "Candidate Name", 
+                    p.Headline as "Headline", 
+                    p.YearsOfExperience as "YoE", 
+                    p.CompanyName as "Current Company",
+                    STRING_AGG(s.SkillName, ', ') AS "Matched Skills", 
+                    (COUNT(DISTINCT s.SkillName) * 100.0 / %s) AS "Match %"
                 FROM Profiles p
                 JOIN Profile_Skills_Mapping psm ON p.ProfileID = psm.ProfileID
                 JOIN Skills s ON psm.SkillID = s.SkillID
                 WHERE s.SkillName IN ({skill_placeholders})
                 GROUP BY p.ProfileID, p.FullName, p.Headline, p.YearsOfExperience, p.CompanyName
                 HAVING (COUNT(DISTINCT s.SkillName) * 100.0 / %s) >= %s
-                ORDER BY MatchPercentage DESC
+                ORDER BY "Match %" DESC
                 LIMIT 50;
             """
             
             num_required_skills = len(required_skills)
-            # FIX: Ensure parameters are passed in the correct order for the 3 placeholders: %s (count), skill_placeholders, %s (count), %s (threshold)
             params = (num_required_skills,) + tuple(required_skills) + (num_required_skills, threshold)
 
             df = pd.read_sql_query(sql, self.pg_engine, params=params)
-            
-            # Rename columns for clarity in output
-            df = df.rename(columns={'fullname': 'Candidate Name', 'companyname': 'Current Company', 'yearsofexperience': 'YoE', 'headline': 'Headline'})
             return df
+            
         except Exception as e:
             print(f"Error finding matching candidates: {e}")
-            print(traceback.format_exc())
+            traceback.print_exc()
             return pd.DataFrame()
 
     def get_all_skills_for_job_title(self, job_title):
@@ -256,6 +258,7 @@ class CareerNavigator:
             return df['SkillName'].tolist()
         except Exception as e:
             print(f"Error fetching job skills for candidate search: {e}")
+            traceback.print_exc()
             return []
 
     def find_eligible_jobs_for_user(self, user_name):
@@ -268,13 +271,17 @@ class CareerNavigator:
         
         status, profile_data = self.get_user_profile(user_name)
         if status == "AMBIGUOUS":
-            return f"Multiple profiles found matching '{user_name}'. Please be more specific with the full name."
+            names_list = '\n- '.join([p[1] for p in profile_data])
+            return f"Multiple profiles found:\n- {names_list}\n\nPlease use the exact full name."
         if status != "UNIQUE_MATCH":
             return f"Could not find a unique profile for '{user_name}'. Please try again with a full name."
 
         # Extract profile details and skills
         profile_id, full_name, headline, experience, company_name = profile_data
         user_skills = self.get_user_skills(profile_id)
+        
+        if not user_skills:
+            return f"**{full_name}** has no skills listed in the profile. Please update your profile with skills to find eligible jobs."
         
         # --- Task 3 Innovation: Federation Output Enhancement Module (Step 1) ---
         profile_summary_prompt = f"""
@@ -293,10 +300,6 @@ class CareerNavigator:
             print(f"Error generating profile summary: {e}")
             profile_summary = f"Hello **{full_name}**! We've retrieved your profile: {headline} with {experience} years of experience at {company_name}. Skills: {', '.join(user_skills)}."
 
-
-        if not user_skills:
-            return f"{profile_summary}\n\n**{full_name}** has no skills listed. Cannot find eligible jobs."
-
         # Find jobs with at least a 40% skill match (MySQL query)
         matching_jobs = self.find_matching_jobs(user_skills, threshold=40)
         
@@ -311,11 +314,15 @@ class CareerNavigator:
         user_name = analysis.get('user_name')
         target_job = analysis.get('target_job')
         target_company = analysis.get('company_name')
-        if not all([user_name, target_job, target_company]): return "For a career path, please specify your name, a target job, and a company."
+        if not all([user_name, target_job, target_company]): 
+            return "For a career path, please specify your name, a target job, and a company."
         
         status, data = self.get_user_profile(user_name)
-        if status == "AMBIGUOUS": return f"Multiple profiles found: **{', '.join([p[1] for p in data])}**. Please be more specific."
-        if status != "UNIQUE_MATCH": return f"Sorry, a profile for '{user_name}' was not found."
+        if status == "AMBIGUOUS": 
+            names_list = '\n- '.join([p[1] for p in data])
+            return f"Multiple profiles found:\n- {names_list}\n\nPlease use the exact full name from the list above."
+        if status != "UNIQUE_MATCH": 
+            return f"Sorry, I couldn't find a profile matching '{user_name}'. Please check the spelling or try the full name."
         
         profile_data = data
         my_skills = self.get_user_skills(profile_data[0])
@@ -328,7 +335,9 @@ class CareerNavigator:
     def get_skills_for_user(self, user_name):
         if not user_name: return "Please specify a name to look up their skills."
         status, data = self.get_user_profile(user_name)
-        if status == "AMBIGUOUS": return f"Multiple profiles found: **{', '.join([p[1] for p in data])}**. Please be more specific."
+        if status == "AMBIGUOUS": 
+            names_list = '\n- '.join([p[1] for p in data])
+            return f"Multiple profiles found:\n- {names_list}\n\nPlease be more specific."
         if status != "UNIQUE_MATCH": return f"Sorry, a profile for '{user_name}' was not found."
         user_skills = self.get_user_skills(data[0])
         if not user_skills: return f"**{data[1]}** has no skills listed."
@@ -362,6 +371,7 @@ class CareerNavigator:
             return f"Found **{len(df)}** job openings matching your criteria:", df
         except Exception as e:
             print(f"Error in find_jobs_by_criteria: {e}")
+            traceback.print_exc()
             return "Sorry, an error occurred while retrieving job data."
 
     def find_matching_jobs(self, user_skills, threshold=0):
@@ -376,7 +386,7 @@ class CareerNavigator:
                     j.JobTitle, 
                     j.CompanyName, 
                     j.Location, 
-                    (SUM(CASE WHEN s.SkillName IN ({skill_placeholders}) THEN 1 ELSE 0 END) / COUNT(DISTINCT jsm.SkillID)) * 100 AS MatchPercentage
+                    ROUND((SUM(CASE WHEN s.SkillName IN ({skill_placeholders}) THEN 1 ELSE 0 END) / COUNT(DISTINCT jsm.SkillID)) * 100, 2) AS MatchPercentage
                 FROM Jobs j 
                 LEFT JOIN Job_Skills_Mapping jsm ON j.JobID = jsm.JobID 
                 LEFT JOIN Skills s ON jsm.SkillID = s.SkillID 
@@ -396,7 +406,7 @@ class CareerNavigator:
             return df
         except Exception as e:
             print(f"Error finding matching jobs: {e}")
-            print(traceback.format_exc())
+            traceback.print_exc()
             return pd.DataFrame()
 
     def get_top_skills(self, limit=5):
@@ -418,34 +428,46 @@ class CareerNavigator:
             profile_choices = {name: pid for pid, name in all_profiles}
             
             # Use fuzzy matching to handle partial or slight misspellings
-            best_matches = process.extract(full_name, profile_choices.keys(), scorer=fuzz.WRatio, limit=5, score_cutoff=80)
+            best_matches = process.extract(full_name, profile_choices.keys(), scorer=fuzz.token_sort_ratio, limit=5, score_cutoff=85)
             
-            if not best_matches: return "NO_MATCH", None
+            if not best_matches: 
+                return "NO_MATCH", None
             
-            # Determine which profile IDs to fetch data for (only the best ones)
+            # Get the top match
             top_match_name, top_match_score, _ = best_matches[0]
-            if top_match_score > 95: 
-                # Very high confidence match, select only the top one
+            
+            # Check if there's a significant gap between top match and second match
+            if len(best_matches) > 1:
+                second_match_score = best_matches[1][1]
+                score_gap = top_match_score - second_match_score
+            else:
+                score_gap = 100  # Only one match, so gap is maximum
+            
+            # Determine if we have a unique match based on:
+            # 1. Very high score (>90) OR
+            # 2. Significant gap (>10 points) between top and second match
+            if top_match_score >= 90 or score_gap >= 10:
+                # Unique match - fetch only this profile
                 matched_profile_ids = [profile_choices[top_match_name]]
-            else: 
-                # Ambiguous matches (multiple profiles with scores > 80)
-                matched_profile_ids = [profile_choices[match[0]] for match in best_matches]
+            else:
+                # Ambiguous - multiple close matches
+                matched_profile_ids = [profile_choices[match[0]] for match in best_matches[:3]]  # Limit to top 3
             
             # Second query to get full profile data
             with psycopg2.connect(**self.pg_conn_params) as conn:
                 with conn.cursor() as cur:
                     query_placeholders = ','.join(['%s'] * len(matched_profile_ids))
-                    # Fetching all required fields for the output
                     cur.execute(f"SELECT ProfileID, FullName, Headline, YearsOfExperience, CompanyName FROM Profiles WHERE ProfileID IN ({query_placeholders});", tuple(matched_profile_ids))
                     matched_profiles_data = cur.fetchall()
             
             if len(matched_profiles_data) == 1: 
-                # Return tuple of (ProfileID, FullName, Headline, YearsOfExperience, CompanyName)
                 return "UNIQUE_MATCH", matched_profiles_data[0]
             else: 
                 return "AMBIGUOUS", matched_profiles_data
+                
         except Exception as e:
             print(f"PostgreSQL Error: {e}")
+            traceback.print_exc()
             return "ERROR", None
 
     def get_user_skills(self, profile_id):
@@ -488,6 +510,7 @@ class CareerNavigator:
         try:
             return self.llm.generate_content(prompt).text
         except Exception as e:
+            print(f"Error generating learning path: {e}")
             return f"An error occurred while generating the learning path: {e}"
 
     def get_internal_skill_audit(self, company_name, target_skills):
@@ -529,6 +552,7 @@ class CareerNavigator:
 
         except Exception as e:
             print(f"Error in internal skill audit SQL: {e}")
+            traceback.print_exc()
             return pd.DataFrame() # Return empty dataframe on error
                 
     def get_external_market_analysis(self, target_job_title):
@@ -544,23 +568,37 @@ class CareerNavigator:
                 return {"open_jobs_count": 0, "common_locations": "N/A"}
             
             # This logic assumes GROUP_CONCAT returns a comma-separated string
-            all_locations = df.iloc[0]['Locations'].split(', ')
-            common_locations = pd.Series(all_locations).value_counts().head(3).index.tolist()
+            all_locations = df.iloc[0]['Locations'].split(', ') if df.iloc[0]['Locations'] else []
+            if all_locations:
+                common_locations = pd.Series(all_locations).value_counts().head(3).index.tolist()
+            else:
+                common_locations = []
 
             return {
                 "open_jobs_count": int(df.iloc[0]['JobCount']),
-                "common_locations": ", ".join(common_locations)
+                "common_locations": ", ".join(common_locations) if common_locations else "N/A"
             }
         except Exception as e:
             print(f"Error in external market analysis: {e}")
+            traceback.print_exc()
             return {"open_jobs_count": 0, "common_locations": "N/A"}
 
     def run_skill_forecast(self, company_name, target_job_title):
         """
         Runs the full "Build vs. Buy" analysis and generates a report.
+        This helps managers decide whether to upskill internal employees or hire externally.
         """
         if not company_name or not target_job_title:
             return "To generate a forecast, please specify your company and the target job title (e.g., 'Data Scientist')."
+        
+        # Validate that company exists in database
+        try:
+            check_sql = "SELECT COUNT(*) FROM Profiles WHERE CompanyName ILIKE %s"
+            check_df = pd.read_sql_query(check_sql, self.pg_engine, params=(f"%{company_name}%",))
+            if check_df.iloc[0][0] == 0:
+                return f"No employees found for company '{company_name}' in our database. Please check the company name."
+        except Exception as e:
+            print(f"Error checking company: {e}")
         
         # --- ROBUST LOGIC ---
         # 1. Get Target Skills from MySQL
@@ -581,7 +619,11 @@ class CareerNavigator:
 
         except Exception as e:
             print(f"Error getting target skills for forecast: {e}")
+            traceback.print_exc()
             target_skills = []
+        
+        if not target_skills:
+            return f"Could not find any skills associated with '{target_job_title}' roles in the job market."
         
         # 3. Federate: Call your helper functions
         internal_candidates_df = self.get_internal_skill_audit(company_name, target_skills)
@@ -621,6 +663,7 @@ class CareerNavigator:
             return response.text
         except Exception as e:
             print(f"Error generating final forecast report: {e}")
+            traceback.print_exc()
             return "Sorry, an error occurred while generating the strategic report."
 
     # --- Profile CRUD Operations ---
@@ -640,6 +683,7 @@ class CareerNavigator:
             return True
         except Exception as e:
             print(f"Error in register_new_user: {e}")
+            traceback.print_exc()
             return False
 
     def update_profile(self, profile_id, name, headline, experience, skills, company_name):
@@ -658,6 +702,7 @@ class CareerNavigator:
             return True
         except Exception as e:
             print(f"Error in update_profile: {e}")
+            traceback.print_exc()
             return False
     
     def get_all_skills(self):
@@ -688,6 +733,7 @@ class CareerNavigator:
             return True
         except Exception as e:
             print(f"Error in delete_profile: {e}")
+            traceback.print_exc()
             return False
 
     # --- Job CRUD Operations ---
@@ -710,6 +756,7 @@ class CareerNavigator:
             return True
         except Exception as e:
             print(f"Error in add_job: {e}")
+            traceback.print_exc()
             return False
 
     def update_job(self, job_id, title, company, location, skills, importance_map):
@@ -731,6 +778,7 @@ class CareerNavigator:
             return True
         except Exception as e:
             print(f"Error in update_job: {e}")
+            traceback.print_exc()
             return False
 
     def delete_job(self, job_id):
@@ -745,6 +793,7 @@ class CareerNavigator:
             return True
         except Exception as e:
             print(f"Error in delete_job: {e}")
+            traceback.print_exc()
             return False
                 
     # --- Data Fetching for Display ---
@@ -755,6 +804,7 @@ class CareerNavigator:
             return pd.read_sql_query(sql, self.pg_engine)
         except Exception as e:
             print(f"Error fetching profiles data: {e}")
+            traceback.print_exc()
             return pd.DataFrame()
         
     def get_all_jobs_data_for_crud(self):
@@ -764,4 +814,5 @@ class CareerNavigator:
             return pd.read_sql_query(sql, self.mysql_engine)
         except Exception as e:
             print(f"Error fetching jobs data for CRUD: {e}")
+            traceback.print_exc()
             return pd.DataFrame()
