@@ -11,9 +11,9 @@ import random
 NUM_PROFILES = 200
 NUM_JOBS = 200
 
-fake = Faker('en_IN') # Use Indian locale for names
+fake = Faker('en_IN') # Indian locale
 
-# --- GROUND TRUTH DATA CORPUS ---
+# --- DATA CORPUS ---
 SKILLS_LIST = [
     'Python', 'Java', 'Go', 'JavaScript', 'C++', 'C#', 'TypeScript', 'PHP', 'Ruby', 'Swift', 'Kotlin', 'R', 'Scala',
     'React', 'Angular', 'Vue.js', 'Node.js', 'Django', 'Flask', 'Spring Boot', 'ASP.NET', 'HTML5', 'CSS3',
@@ -28,8 +28,10 @@ COMPANIES_LIST = [
     'Google', 'Microsoft', 'Amazon', 'Salesforce', 'Adobe', 'Oracle', 'SAP', 'VMware', 'Intel', 'IBM',
     'TCS', 'Infosys', 'Wipro', 'HCL Tech', 'Tech Mahindra', 'Capgemini', 'Accenture', 'Deloitte',
     'Flipkart', 'Swiggy', 'Zomato', 'Paytm', 'Ola Cabs', 'BYJU\'S', 'Zerodha', 'PhonePe', 'Razorpay',
-    'Freshworks', 'Zoho', 'Myntra', 'Publicis Sapient', 'IIIT-D', 'DTU', 'IIT Delhi', 'NSUT' # Add some colleges
+    'Freshworks', 'Zoho', 'Myntra', 'Publicis Sapient', 'IIIT-D', 'DTU', 'IIT Delhi', 'NSUT'
 ]
+
+CITIES_LIST = ['Bangalore', 'Pune', 'Hyderabad', 'Mumbai', 'Chennai', 'Delhi', 'Gurgaon', 'Noida', 'Kolkata']
 
 ARCHETYPES = {
     "data_scientist": {
@@ -102,13 +104,15 @@ def setup_postgres_db():
                 SkillName VARCHAR(100) NOT NULL UNIQUE
             );
         """)
+        # --- UPDATE: Added Location Column ---
         cur.execute("""
             CREATE TABLE Profiles (
                 ProfileID SERIAL PRIMARY KEY,
                 FullName VARCHAR(100) NOT NULL,
                 Headline VARCHAR(255),
                 YearsOfExperience INT,
-                CompanyName VARCHAR(100) 
+                CompanyName VARCHAR(100),
+                Location VARCHAR(100)
             );
         """)
         cur.execute("""
@@ -120,15 +124,12 @@ def setup_postgres_db():
         """)
         print("Created new PostgreSQL tables.")
 
-        # 1. Populate Skills
         skill_name_to_id = {}
         for skill in SKILLS_LIST:
             cur.execute("INSERT INTO Skills (SkillName) VALUES (%s) RETURNING SkillID;", (skill,))
             skill_id = cur.fetchone()[0]
             skill_name_to_id[skill] = skill_id
-        print(f"Populated {len(skill_name_to_id)} skills into Postgres.")
 
-        # 2. Populate Profiles
         print(f"Generating {NUM_PROFILES} profiles...")
         for i in range(NUM_PROFILES):
             full_name = fake.name()
@@ -136,14 +137,15 @@ def setup_postgres_db():
             headline = random.choice(ARCHETYPES[archetype_key]["titles"])
             experience = random.randint(0, 15)
             company = random.choice(COMPANIES_LIST)
+            location = random.choice(CITIES_LIST) # --- Random City ---
 
+            # --- UPDATE: Inserting Location ---
             cur.execute(
-                "INSERT INTO Profiles (FullName, Headline, YearsOfExperience, CompanyName) VALUES (%s, %s, %s, %s) RETURNING ProfileID;",
-                (full_name, headline, experience, company)
+                "INSERT INTO Profiles (FullName, Headline, YearsOfExperience, CompanyName, Location) VALUES (%s, %s, %s, %s, %s) RETURNING ProfileID;",
+                (full_name, headline, experience, company, location)
             )
             profile_id = cur.fetchone()[0]
 
-            # 3. Map skills
             num_core = random.randint(3, len(ARCHETYPES[archetype_key]["core"]))
             num_secondary = random.randint(2, len(ARCHETYPES[archetype_key]["secondary"]))
             num_random = random.randint(0, 3)
@@ -214,22 +216,19 @@ def setup_mysql_db():
         """)
         print("Created new MySQL tables.")
 
-        # 1. Populate Skills
         skill_name_to_id = {}
         for skill in SKILLS_LIST:
             cur.execute("INSERT INTO Skills (SkillName) VALUES (%s);", (skill,))
             skill_id = cur.lastrowid
             skill_name_to_id[skill] = skill_id
         conn.commit()
-        print(f"Populated {len(skill_name_to_id)} skills into MySQL.")
 
-        # 2. Populate Jobs
         print(f"Generating {NUM_JOBS} jobs...")
         for i in range(NUM_JOBS):
             archetype_key = random.choice(list(ARCHETYPES.keys()))
             title = random.choice(ARCHETYPES[archetype_key]["titles"])
             company = random.choice(COMPANIES_LIST)
-            location = fake.city()
+            location = random.choice(CITIES_LIST)
 
             cur.execute(
                 "INSERT INTO Jobs (JobTitle, CompanyName, Location) VALUES (%s, %s, %s);",
@@ -237,7 +236,6 @@ def setup_mysql_db():
             )
             job_id = cur.lastrowid
 
-            # 3. Map skills
             archetype = ARCHETYPES[archetype_key]
             job_skills = set()
             num_mandatory = random.randint(2, len(archetype["core"]))
@@ -256,10 +254,10 @@ def setup_mysql_db():
                         (job_id, skill_id, importance)
                     )
             if (i + 1) % 50 == 0:
-                conn.commit() # Commit in batches
+                conn.commit()
                 print(f"  ... {i+1}/{NUM_JOBS} jobs created.")
 
-        conn.commit() # Final commit
+        conn.commit()
         print("MySQL setup successful. ✅")
 
     except Error as error:
@@ -269,7 +267,7 @@ def setup_mysql_db():
             conn.close()
 
 if __name__ == "__main__":
-    print("Starting large-scale database setup...")
+    print("Starting database setup...")
     setup_postgres_db()
     setup_mysql_db()
-    print("\nAll databases are set up and populated with 200 profiles and 200 jobs! 🚀")
+    print("\n✅ All databases are set up with Location support!")
