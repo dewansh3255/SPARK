@@ -135,6 +135,8 @@ class CareerNavigator:
             return "Sorry, I encountered an error."
 
     # --- ANALYTICS ENGINE (Handles Complex Queries) ---
+# --- ANALYTICS ENGINE (Handles Complex Queries) ---
+    # --- ANALYTICS ENGINE (Handles Complex Queries) ---
     def run_analytics_query(self, params):
         metric = params.get("metric")
         target_table = params.get("target_table")
@@ -142,7 +144,7 @@ class CareerNavigator:
         target_skill = params.get("target_skill")
         min_exp = params.get("min_experience")
         limit = params.get("limit", 10)
-        target_job = params.get("target_job") # For filtering titles
+        target_job = params.get("target_job") 
         
         try:
             # 1. PROFILE ANALYTICS (Postgres)
@@ -166,7 +168,6 @@ class CareerNavigator:
                     return f"Top companies with employees having > {min_exp} years experience:", df
 
                 if (metric == "RANK" or metric == "COUNT") and group_by == "Headline": 
-                    # Dynamic filtering based on target_job or just generic ranking
                     if target_job:
                         sql = "SELECT Headline, COUNT(*) as Count FROM Profiles WHERE Headline ILIKE %s GROUP BY Headline ORDER BY Count DESC"
                         params = (f"%{target_job}%",)
@@ -181,6 +182,7 @@ class CareerNavigator:
 
             # 2. JOB ANALYTICS (MySQL)
             if target_table == "JOBS":
+                # Handle Specific Rankings
                 if metric == "RANK" and group_by == "Location": 
                     title = params.get("target_job", "")
                     sql = "SELECT Location, COUNT(*) as JobOpenings FROM Jobs WHERE JobTitle LIKE %s GROUP BY Location ORDER BY JobOpenings DESC LIMIT 5"
@@ -198,6 +200,16 @@ class CareerNavigator:
                     """
                     df = pd.read_sql_query(sql, self.mysql_engine, params=(f"%{title}%",))
                     return f"Top demanded mandatory skills for **{title}**:", df
+
+                # --- FIX START: Catch-all for "List Companies/Jobs" queries ---
+                # If we are here, it's a JOB query that isn't a specific RANK. 
+                # Redirect it to the universal job search engine.
+                return self.find_jobs_by_criteria(
+                    company_name=params.get("company_name"), 
+                    location=params.get("location"), 
+                    skills=target_skill
+                )
+                # --- FIX END ---
 
             # 3. COMPARISON (Cross-DB)
             if metric == "COMPARE":
@@ -281,37 +293,56 @@ class CareerNavigator:
             return "Error searching for people."
 
     # --- UNIVERSAL SEARCH (Jobs) ---
+# --- UNIVERSAL SEARCH (Jobs) ---
     def find_jobs_by_criteria(self, company_name=None, job_title=None, location=None, skills=None):
+        """
+        Fixed to handle LOCATION LISTS and show ALL skills in output.
+        """
         if not any([company_name, job_title, location, skills]): return "Please specify criteria."
         try:
-            params = []
-            conditions = []
+            final_params = []
+            where_sql_part = ""
             
-            sql = """
+            # 1. Build WHERE
+            where_conditions = []
+            if company_name: 
+                where_conditions.append("j.CompanyName LIKE %s")
+                final_params.append(f"%{company_name}%")
+            
+            if job_title: 
+                where_conditions.append("j.JobTitle LIKE %s")
+                final_params.append(f"%{job_title}%")
+            
+            # --- FIX: Handle Location List or String ---
+            if location:
+                if isinstance(location, str): location = [location]
+                # Create multiple OR conditions for locations to handle lists like ['Noida']
+                loc_placeholders = ' OR '.join(['j.Location LIKE %s' for _ in location])
+                where_conditions.append(f"({loc_placeholders})")
+                final_params.extend([f"%{l}%" for l in location])
+            
+            if where_conditions: where_sql_part = " WHERE " + " AND ".join(where_conditions)
+            
+            # 2. Build HAVING
+            having_sql_part = ""
+            if skills:
+                if isinstance(skills, str): skills = [skills]
+                h_parts = []
+                for skill in skills:
+                    # SUM trick: filters jobs matching the skill without hiding other skills in the results
+                    h_parts.append("SUM(CASE WHEN s.SkillName LIKE %s THEN 1 ELSE 0 END) > 0")
+                    final_params.append(skill)
+                having_sql_part = " HAVING " + " AND ".join(h_parts)
+
+            # 3. Assemble
+            final_sql = """
                 SELECT j.JobTitle, j.CompanyName, j.Location, GROUP_CONCAT(DISTINCT s.SkillName SEPARATOR ', ') AS RequiredSkills 
                 FROM Jobs j 
                 LEFT JOIN Job_Skills_Mapping jsm ON j.JobID = jsm.JobID 
                 LEFT JOIN Skills s ON jsm.SkillID = s.SkillID
-            """
-            
-            if company_name: conditions.append("j.CompanyName LIKE %s"); params.append(f"%{company_name}%")
-            if job_title: conditions.append("j.JobTitle LIKE %s"); params.append(f"%{job_title}%")
-            if location: conditions.append("j.Location LIKE %s"); params.append(f"%{location}%")
-            
-            having_clause = ""
-            if skills:
-                if isinstance(skills, str): skills = [skills]
-                placeholders = ', '.join(['%s'] * len(skills))
-                conditions.append(f"s.SkillName IN ({placeholders})")
-                params.extend(skills)
-                having_clause = f"HAVING COUNT(DISTINCT s.SkillName) >= {len(skills)}"
+            """ + where_sql_part + " GROUP BY j.JobID" + having_sql_part + " ORDER BY j.CompanyName, j.JobTitle;"
 
-            if conditions: sql += " WHERE " + " AND ".join(conditions)
-            sql += " GROUP BY j.JobID"
-            if having_clause: sql += " " + having_clause
-            sql += " ORDER BY j.CompanyName, j.JobTitle;"
-
-            df = pd.read_sql_query(sql, self.mysql_engine, params=tuple(params))
+            df = pd.read_sql_query(final_sql, self.mysql_engine, params=tuple(final_params))
             if df.empty: return "No job openings found matching your criteria."
             return f"Found **{len(df)}** job openings:", df
         except Exception as e:
