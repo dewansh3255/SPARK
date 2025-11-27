@@ -24,14 +24,29 @@ with tab1:
     if "messages" not in st.session_state:
         st.session_state.messages = []
 
-    # Display chat history
+    # --- FIX 1: Updated History Loop to handle LISTS ---
     for message in st.session_state.messages:
         with st.chat_message(message["role"]):
-            if isinstance(message["content"], tuple):
-                st.markdown(message["content"][0])
-                st.dataframe(message["content"][1], width='stretch')
+            content = message["content"]
+            
+            # Case 1: Multiple Responses (List)
+            if isinstance(content, list):
+                for res in content:
+                    if isinstance(res, tuple):
+                        st.markdown(res[0])
+                        st.dataframe(res[1], width='stretch')
+                    else:
+                        st.markdown(str(res))
+                    st.markdown("---")
+            
+            # Case 2: Legacy Single Response (Tuple)
+            elif isinstance(content, tuple):
+                st.markdown(content[0])
+                st.dataframe(content[1], width='stretch')
+            
+            # Case 3: Simple String
             else:
-                st.markdown(str(message["content"]))
+                st.markdown(str(content))
 
     # User input chat bar
     if prompt := st.chat_input("What would you like to know?"):
@@ -43,18 +58,27 @@ with tab1:
         # Generate and display assistant response
         with st.chat_message("assistant"):
             with st.spinner("Thinking..."):
-                response = navigator.execute_general_query(prompt)
-                st.session_state.messages.append({"role": "assistant", "content": response})
+                # "responses" is now a LIST of results
+                responses = navigator.execute_general_query(prompt)
                 
-                if isinstance(response, tuple):
-                    st.markdown(response[0])
-                    st.dataframe(response[1], width='stretch')
+                # We store it in session state
+                st.session_state.messages.append({"role": "assistant", "content": responses})
+                
+                # Handle the display loop
+                if isinstance(responses, list):
+                    for res in responses:
+                        if isinstance(res, tuple):
+                            st.markdown(res[0])
+                            st.dataframe(res[1], width='stretch')
+                        else:
+                            st.markdown(str(res))
+                        st.markdown("---") # Separator between actions
                 else:
-                    st.markdown(str(response))
+                    st.markdown(str(responses))
         
         # Rerun to ensure layout updates correctly after response
         st.rerun()
-
+        
 # ==============================================================================
 # --- TAB 2: The Data Management Dashboard ---
 # ==============================================================================

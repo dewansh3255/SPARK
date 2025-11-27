@@ -48,33 +48,42 @@ class CareerNavigator:
         Master function. Handles standard queries, ANALYTICS, and complex filters.
         """
         intent_prompt = f"""
+        You are the query orchestrator for SPARK.
         Analyze the user's query to classify intent and extract detailed entities.
+        
+        **Goal:** Break down the query into a LIST of actionable tasks.
+        
+        **CRITICAL DECOMPOSITION RULES:**
+        1. **"AND" Logic:** If the user asks distinct questions separated by "AND", split them into separate objects (e.g., "Find Jobs AND Find People" -> 2 objects).
+           - Distinguish "Python AND SQL" (One task, 2 skills) vs "Find Jobs AND Find People" (Two separate tasks).
+        2. **"OR" Logic (Job Titles):** If the user searches for multiple job titles (e.g., "Software Engineer OR Backend Engineer"), create a **SEPARATE** 'FIND_JOBS' task for each title.
+           - *Reason:* The database can only search one title at a time.
+           - *Example:* "Jobs for Data Scientist or Analyst" -> [{{ "intent": "FIND_JOBS", "target_job": "Data Scientist" }}, {{ "intent": "FIND_JOBS", "target_job": "Analyst" }}]
 
         **Intents:**
-        - 'CAREER_PATH': Skill gap analysis for a specific job.
-        - 'FIND_JOBS': Find job listings.
-        - 'ELIGIBLE_JOBS': Find jobs matching a user's profile.
-        - 'CANDIDATE_SEARCH': Find people eligible for a specific job title.
-        - 'FIND_PEOPLE': List people filtered by Skills, Company, Location, or Experience.
-        - 'ANALYTICS': Complex questions involving Counts, Averages, Rankings, "Top N", or Comparisons.
-        - 'PROFILE_AGGREGATION': Simple counts (e.g., "How many people...", "Count candidates...").
-        - 'SKILL_FORECAST': "Build vs. Buy" analysis.
-        - 'SKILL_LOOKUP': List skills for a job.
-        - 'USER_SKILL_LOOKUP': List skills of a specific person.
-        - 'UNKNOWN': Query is unclear.
+        1. 'CAREER_PATH': Personalized skill-gap analysis.
+        2. 'FIND_JOBS': Search job listings.
+        3. 'ELIGIBLE_JOBS': Find jobs matching a user's profile.
+        4. 'CANDIDATE_SEARCH': Find candidates eligible for a specific job.
+        5. 'FIND_PEOPLE': Search candidates with filters (Skills, Location, Experience).
+        6. 'ANALYTICS': Questions involving Counts, Rankings, Averages, or Comparisons.
+        7. 'PROFILE_AGGREGATION': Simple counts of people.
+        8. 'SKILL_FORECAST': "Build vs. Buy" analysis.
+        9. 'SKILL_LOOKUP': List skills for a job.
+        10. 'USER_SKILL_LOOKUP': List skills of a person.
 
         **Entities:**
         - 'user_name': Person's name.
         - 'company_name': Target company.
         - 'exclude_company': Company to EXCLUDE (e.g. "NOT at Google").
-        - 'target_job': Job title.
-        - 'location': City or locations (list).
-        - 'target_skill': Skill or list of strings representing skills.
+        - 'target_job': **SINGLE** Job title string (e.g. "Manager"). Never a list.
+        - 'location': City or list of cities.
+        - 'target_skill': Skill or list of strings.
         - 'min_experience': Integer (years).
         
-        **Analytics Specifics (Only for ANALYTICS intent):**
+        **Analytics Specifics:**
         - 'metric': "COUNT", "AVG", "RANK", "COMPARE"
-        - 'target_table': "PROFILES" or "JOBS"
+        - 'target_table': "PROFILES" (for candidates/employees) or "JOBS" (for openings).
         - 'group_by': "Company", "Location", "Headline", "Skill"
         - 'limit': Integer (e.g. Top 5 -> 5)
 
@@ -83,59 +92,84 @@ class CareerNavigator:
         - "Frontend Engineer" -> "Frontend Developer"
 
         **Instructions:**
-        - Return ONLY raw JSON.
+        - Return a JSON LIST of objects (e.g. [{{...}}, {{...}}]).
+        - Do not include markdown formatting.
 
-        **Examples:**
-        - "Top 5 companies with most employees > 8 years exp" -> {{"intent": "ANALYTICS", "metric": "RANK", "target_table": "PROFILES", "group_by": "Company", "limit": 5, "min_experience": 8}}
-        - "Average years of experience for Python devs" -> {{"intent": "ANALYTICS", "metric": "AVG", "target_table": "PROFILES", "target_skill": ["Python"]}}
-        - "Candidates with ML but NOT at Google" -> {{"intent": "FIND_PEOPLE", "target_skill": ["Machine Learning"], "exclude_company": "Google"}}
-        - "Jobs for Python and SQL" -> {{"intent": "FIND_JOBS", "target_skill": ["Python", "SQL"]}}
-        - "Compare Profiles with Java vs Jobs with Java" -> {{"intent": "ANALYTICS", "metric": "COMPARE", "target_skill": ["Java"]}}
-        - "How many candidates have Python?" -> {{"intent": "PROFILE_AGGREGATION", "target_skill": ["Python"]}}
-        - "Count profiles with SQL, Python and ML" -> {{"intent": "PROFILE_AGGREGATION", "target_skill": ["SQL", "Python", "Machine Learning"]}}
-        - "Count profiles for each headline with 'Manager'" -> {{"intent": "ANALYTICS", "metric": "COUNT", "target_table": "PROFILES", "group_by": "Headline", "target_job": "Manager"}}
-        
-        **Query:** "{query}"
+        **Few-Shot Examples:**
+
+        *User:* "I know Python, Docker, and Go. Any jobs for Software Engineer or Backend Engineer?"
+        *JSON:* [
+            {{ "intent": "FIND_JOBS", "target_job": "Software Engineer", "target_skill": ["Python", "Docker", "Go"] }},
+            {{ "intent": "FIND_JOBS", "target_job": "Backend Engineer", "target_skill": ["Python", "Docker", "Go"] }}
+        ]
+
+        *User:* "Find candidates with Python AND Machine Learning in Bangalore."
+        *JSON:* [{{ "intent": "FIND_PEOPLE", "target_skill": ["Python", "Machine Learning"], "location": ["Bangalore"] }}]
+
+        *User:* "List jobs at Google AND find candidates for Data Scientist."
+        *JSON:* [{{ "intent": "FIND_JOBS", "company_name": "Google" }}, {{ "intent": "CANDIDATE_SEARCH", "target_job": "Data Scientist" }}]
+
+        *User:* "What is the average years of experience for Python devs? AND List top 5 companies with most employees > 8 years exp. AND Show me candidates with ML but NOT at Google."
+        *JSON:* [
+            {{ "intent": "ANALYTICS", "metric": "AVG", "target_table": "PROFILES", "target_skill": ["Python"] }},
+            {{ "intent": "ANALYTICS", "metric": "RANK", "target_table": "PROFILES", "group_by": "Company", "min_experience": 8, "limit": 5 }},
+            {{ "intent": "FIND_PEOPLE", "target_skill": ["Machine Learning"], "exclude_company": "Google" }}
+        ]
+
+        **User Query:** "{query}"
         **JSON:**
         """
         try:
             response = self.llm.generate_content(intent_prompt)
             json_text = response.text.strip().replace("```json", "").replace("```", "").strip()
-            analysis = json.loads(json_text)
-            intent = analysis.get("intent")
             
-            if intent == "CAREER_PATH": return self.run_dynamic_query(analysis)
-            elif intent == "FIND_JOBS": 
-                return self.find_jobs_by_criteria(
-                    analysis.get("company_name"), 
-                    analysis.get("target_job"), 
-                    analysis.get("location"),
-                    analysis.get("target_skill")
-                )
-            elif intent == "ELIGIBLE_JOBS": return self.find_eligible_jobs_for_user(analysis.get("user_name"))
-            elif intent == "CANDIDATE_SEARCH": return self.find_eligible_candidates_for_job(analysis.get("target_job"))
-            elif intent == "FIND_PEOPLE": 
-                return self.find_people(
-                    analysis.get("target_skill"), 
-                    analysis.get("company_name"), 
-                    analysis.get("min_experience"),
-                    analysis.get("location"),
-                    analysis.get("exclude_company")
-                )
-            elif intent == "ANALYTICS": return self.run_analytics_query(analysis)
-            elif intent == "PROFILE_AGGREGATION": return self.aggregate_profile_query(analysis.get("target_skill"), analysis.get("company_name"))
-            elif intent == "SKILL_LOOKUP": return self.get_skills_for_job(analysis.get("target_job"), analysis.get("company_name"))
-            elif intent == "USER_SKILL_LOOKUP": return self.get_skills_for_user(analysis.get("user_name"))
-            elif intent == "SKILL_FORECAST": return self.run_skill_forecast(analysis.get("company_name"), analysis.get("target_job"))
-            else: return "Sorry, I can only answer questions about career paths, job eligibility, job listings, skills, analytics, or corporate skill forecasts."
+            # DEBUG: See how the LLM split the tasks
+            print(f"\n[DEBUG] Decomposed Tasks:\n{json_text}\n")
+            
+            data = json.loads(json_text)
+            analysis_list = [data] if isinstance(data, dict) else data
+                
+            final_results = []
+
+            for analysis in analysis_list:
+                intent = analysis.get("intent")
+                result = None
+                
+                if intent == "CAREER_PATH": result = self.run_dynamic_query(analysis)
+                elif intent == "FIND_JOBS": 
+                    result = self.find_jobs_by_criteria(
+                        analysis.get("company_name"), 
+                        analysis.get("target_job"), 
+                        analysis.get("location"),
+                        analysis.get("target_skill")
+                    )
+                elif intent == "ELIGIBLE_JOBS": result = self.find_eligible_jobs_for_user(analysis.get("user_name"))
+                elif intent == "CANDIDATE_SEARCH": result = self.find_eligible_candidates_for_job(analysis.get("target_job"))
+                elif intent == "FIND_PEOPLE": 
+                    result = self.find_people(
+                        analysis.get("target_skill"), 
+                        analysis.get("company_name"), 
+                        analysis.get("min_experience"),
+                        analysis.get("location"),
+                        analysis.get("exclude_company")
+                    )
+                elif intent == "ANALYTICS": result = self.run_analytics_query(analysis)
+                elif intent == "PROFILE_AGGREGATION": result = self.aggregate_profile_query(analysis.get("target_skill"), analysis.get("company_name"))
+                elif intent == "SKILL_LOOKUP": result = self.get_skills_for_job(analysis.get("target_job"), analysis.get("company_name"))
+                elif intent == "USER_SKILL_LOOKUP": result = self.get_skills_for_user(analysis.get("user_name"))
+                elif intent == "SKILL_FORECAST": result = self.run_skill_forecast(analysis.get("company_name"), analysis.get("target_job"))
+                else: result = "Sorry, I can only answer questions about career paths, job eligibility, job listings, skills, analytics, or corporate skill forecasts."
+                
+                if result:
+                    final_results.append(result)
+            
+            return final_results
         
         except Exception as e:
             print(f"Error: {e}")
             traceback.print_exc()
-            return "Sorry, I encountered an error."
-
-    # --- ANALYTICS ENGINE (Handles Complex Queries) ---
-# --- ANALYTICS ENGINE (Handles Complex Queries) ---
+            return ["Sorry, I encountered an error."]
+        
     # --- ANALYTICS ENGINE (Handles Complex Queries) ---
     def run_analytics_query(self, params):
         metric = params.get("metric")
